@@ -3,13 +3,19 @@ import { getFullnodeUrl, SuiClient } from "@mysten/sui/client";
 import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 
+type BalanceManagersMap = Record<string, { address: string }>;
+
 export class DeepBookBot {
   readonly suiClient: SuiClient;
   readonly dbClient: DeepBookClient;
   readonly keypair: Ed25519Keypair;
   readonly env: "testnet" | "mainnet";
 
-  constructor(privateKey: string, env: "testnet" | "mainnet") {
+  constructor(
+    privateKey: string,
+    env: "testnet" | "mainnet",
+    opts?: { balanceManagers?: BalanceManagersMap }
+  ) {
     this.env = env;
     this.keypair = DeepBookBot.getSignerFromPK(privateKey);
 
@@ -19,6 +25,9 @@ export class DeepBookBot {
       address: this.getActiveAddress(),
       env,
       client: this.suiClient,
+
+      // ✅ THIS is what makes accountOpenOrders(pool, "BM1") work
+      balanceManagers: opts?.balanceManagers,
     });
   }
 

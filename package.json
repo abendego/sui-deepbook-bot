@@ -14,7 +14,10 @@
     "place:one": "tsx ./src/scripts/placeOneOrder.ts",
     "cancel:all": "tsx ./src/scripts/cancelAll.ts",
     "register:manager": "tsx ./src/scripts/registerManager.ts",
-    "inspect:tx": "tsx ./src/scripts/inspectTx.ts"
+    "inspect:tx": "tsx ./src/scripts/inspectTx.ts",
+    "place:badbid": "tsx ./src/scripts/placeBadBid.ts",
+    "register:pool": "tsx ./src/scripts/registerPool.ts",
+    "inspect:db": "tsx ./src/scripts/inspectDb.ts"
   },
   "dependencies": {
     "@mysten/deepbook-v3": "^0.26.0",

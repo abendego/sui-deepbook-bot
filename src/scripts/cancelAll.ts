@@ -42,89 +42,37 @@ async function tryCall(fn: Function, label: string, args: any[]) {
   }
 }
 
-function tryPatchDeepBookConfig(dbClient: any, managerKey: string, managerId: string) {
-  const cfg =
-    dbClient?.config ??
-    dbClient?.deepBookConfig ??
-    dbClient?.deepbookConfig ??
-    dbClient?.deepBook?.config ??
-    null;
+function normalizeOpenOrders(openRaw: any): any[] {
+  if (Array.isArray(openRaw)) return openRaw;
+  if (Array.isArray(openRaw?.open)) return openRaw.open;
+  if (Array.isArray(openRaw?.orders)) return openRaw.orders;
+  if (Array.isArray(openRaw?.data)) return openRaw.data;
+  return [];
+}
 
-  const deep = dbClient?.deepBook ?? null;
-
-  let ok = false;
-  const notes: string[] = [];
-
-  const setterCandidates = [
-    "setBalanceManager",
-    "setBalanceManagerId",
-    "setBalanceManagerIds",
-    "addBalanceManager",
-    "registerBalanceManager",
-  ];
-
-  for (const name of setterCandidates) {
-    const fn = cfg?.[name] ?? deep?.[name];
-    if (typeof fn === "function") {
-      try {
-        fn.call(cfg ?? deep, managerKey, managerId);
-        notes.push(`used ${name}(key,id)`);
-        ok = true;
-        break;
-      } catch {
-        // keep trying
-      }
-    }
-  }
-
-  if (!ok) {
-    const targets = [
-      cfg?.balanceManagers,
-      cfg?.balanceManagerIds,
-      cfg?.managerIds,
-      cfg?.managers,
-      dbClient?.balanceManagerIds,
-    ];
-
-    for (const t of targets) {
-      // Map
-      if (t && typeof t.set === "function") {
-        try {
-          t.set(managerKey, managerId);
-          notes.push("set Map(managerKey->managerId)");
-          ok = true;
-          break;
-        } catch {}
-      }
-      // Object
-      if (t && typeof t === "object" && !Array.isArray(t)) {
-        try {
-          t[managerKey] = managerId;
-          notes.push("set object[managerKey]=managerId");
-          ok = true;
-          break;
-        } catch {}
-      }
-    }
-  }
-
-  log.info({ managerKey, managerId, ok, notes }, "DeepBookConfig patch attempt (best-effort)");
-  return ok;
+function extractOrderId(o: any): string | null {
+  return (
+    o?.orderId ??
+    o?.id ??
+    o?.order_id ??
+    o?.orderID ??
+    o?.order ??
+    o?.order_id_str ??
+    null
+  );
 }
 
 async function main() {
   const env: any = getEnv();
   if (!env.POOL_KEY) throw new Error("Missing POOL_KEY in .env");
 
-  const bot = new DeepBookBot(env.SUI_PRIVATE_KEY, env.SUI_ENV);
-
-  const managerId = env.BALANCE_MANAGER_ID; // ✅ 0x...
-  const managerKey = env.BALANCE_MANAGER_KEY ?? env.MANAGER_KEY ?? "BM1"; // ✅ BM1
-
+  const managerKey = String(env.BALANCE_MANAGER_KEY ?? "BM1").trim();
+  const managerId = String(env.BALANCE_MANAGER_ID ?? "").trim(); // 0x...
   if (!managerId) throw new Error("Missing BALANCE_MANAGER_ID in .env");
 
-  // Patch mapping for this run (so open-order reads work)
-  tryPatchDeepBookConfig(bot.dbClient as any, managerKey, managerId);
+  const bot = new DeepBookBot(env.SUI_PRIVATE_KEY, env.SUI_ENV, {
+    balanceManagers: { [managerKey]: { address: managerId } },
+  });
 
   // 1) Collect orderIds
   let orderIds: string[] = [];
@@ -137,13 +85,26 @@ async function main() {
     log.info({ count: orderIds.length, orderIds }, "Using ORDER_IDS from .env");
   } else {
     try {
-      const open = await (bot.dbClient as any).accountOpenOrders(env.POOL_KEY, managerKey);
-      orderIds = (open ?? []).map((o: any) => o.orderId ?? o.id).filter(Boolean);
-      log.info({ openCount: orderIds.length, orderIds }, "Open order IDs (by managerKey)");
+      const openRaw = await (bot.dbClient as any).accountOpenOrders(env.POOL_KEY, managerKey);
+      const openList = normalizeOpenOrders(openRaw);
+
+      orderIds = openList
+        .map((o: any) => extractOrderId(o))
+        .filter(Boolean) as string[];
+
+      log.info(
+        {
+          openCount: orderIds.length,
+          orderIds,
+          managerKey,
+          managerId,
+        },
+        "Open order IDs (by managerKey)"
+      );
     } catch (e: any) {
       log.error(
-        { err: e?.message ?? String(e), managerKey },
-        "Failed to read open orders (mapping issue). Set ORDER_IDS=... in .env as fallback."
+        { err: e?.message ?? String(e), managerKey, managerId },
+        "Failed to read open orders. As a fallback, set ORDER_IDS=... in .env."
       );
       process.exit(1);
     }
@@ -168,9 +129,9 @@ async function main() {
   const fn = deep[hit].bind(deep);
 
   const errors: any[] = [];
-  let built = false;
+  let builtAny = false;
 
-  // ✅ cancel tx-builders generally want managerId (0x...), not "BM1"
+  // cancel tx-builders generally want managerId (0x...), not "BM1"
   for (const orderId of orderIds) {
     const attempts: Array<[string, any[]]> = [
       ["txb,pool,managerId,orderId", [txb, env.POOL_KEY, managerId, orderId]],
@@ -179,23 +140,24 @@ async function main() {
       ["txb,orderId", [txb, orderId]],
     ];
 
-    let okOne = false;
+    let builtThis = false;
+
     for (const [label, args] of attempts) {
       const res = await tryCall(fn, label, args);
       if (res.ok) {
-        okOne = true;
-        built = true;
+        builtThis = true;
+        builtAny = true;
         break;
       }
       errors.push({ orderId, label, err: res.err });
     }
 
-    if (!okOne) {
+    if (!builtThis) {
       log.warn({ orderId }, "Could not add cancel for this orderId (continuing).");
     }
   }
 
-  if (!built) {
+  if (!builtAny) {
     log.error({ errors }, "All cancel signatures failed");
     throw new Error("Could not build cancel tx (see errors above).");
   }
